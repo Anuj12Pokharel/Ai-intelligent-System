@@ -1,0 +1,14 @@
+playwright
+beautifulsoup4
+lxml
+pymupdf
+chromadb
+sentence-transformers
+langchain
+openai
+fastapi
+uvicorn
+pytest
+requests
+click
+pydantic
