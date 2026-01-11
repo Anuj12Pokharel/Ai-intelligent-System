@@ -161,6 +161,126 @@ class NepaliLegalParser:
         self._flush_chapter(current_chapter, current_part, act)
         self._flush_part(current_part, act)
 
+        # FALLBACK: If no structure found, create default structure from content
+        if len(act.parts) == 0 and len(act.chapters) == 0:
+            # Try to find Parts and Chapters first
+            current_part = None
+            current_chapter = None
+            current_section = None
+            content_buffer = []
+            
+            for i, line in enumerate(self.text_lines):
+                # Check for Part (भाग) - very flexible
+                if 'भाग' in line and any(c.isdigit() or '\u0966' <= c <= '\u096F' for c in line):
+                    # Flush previous
+                    if current_section and content_buffer:
+                        current_section.content = ' '.join(content_buffer)
+                        clauses = self.detect_clauses(current_section.content)
+                        if clauses:
+                            current_section.clauses = clauses
+                        if current_chapter:
+                            current_chapter.sections.append(current_section)
+                    
+                    if current_chapter and current_part:
+                        current_part.chapters.append(current_chapter)
+                    
+                    if current_part:
+                        act.parts.append(current_part)
+                    
+                    # Start new Part
+                    part_num = self.extract_number(line)
+                    current_part = Part(
+                        part_number=part_num if part_num else str(len(act.parts) + 1),
+                        title=line,
+                        chapters=[]
+                    )
+                    current_chapter = None
+                    current_section = None
+                    content_buffer = []
+                    continue
+                
+                # Check for Chapter (परिच्छेद) - very flexible
+                if 'परिच्छेद' in line and any(c.isdigit() or '\u0966' <= c <= '\u096F' for c in line):
+                    # Flush previous section
+                    if current_section and content_buffer:
+                        current_section.content = ' '.join(content_buffer)
+                        clauses = self.detect_clauses(current_section.content)
+                        if clauses:
+                            current_section.clauses = clauses
+                        if current_chapter:
+                            current_chapter.sections.append(current_section)
+                    
+                    if current_chapter and current_part:
+                        current_part.chapters.append(current_chapter)
+                    
+                    # Start new Chapter
+                    chap_num = self.extract_number(line)
+                    current_chapter = Chapter(
+                        chapter_number=chap_num if chap_num else str(len(current_part.chapters) + 1 if current_part else 1),
+                        title=line,
+                        sections=[]
+                    )
+                    current_section = None
+                    content_buffer = []
+                    continue
+                
+                # Check for Section (दफा/धारा) - very flexible
+                if ('दफा' in line or 'धारा' in line) and any(c.isdigit() or '\u0966' <= c <= '\u096F' for c in line):
+                    # Flush previous section
+                    if current_section and content_buffer:
+                        current_section.content = ' '.join(content_buffer)
+                        clauses = self.detect_clauses(current_section.content)
+                        if clauses:
+                            current_section.clauses = clauses
+                        
+                        # Add to current chapter or create default
+                        if not current_chapter:
+                            current_chapter = Chapter(
+                                chapter_number="1",
+                                title="सामान्य (General)",
+                                sections=[]
+                            )
+                        current_chapter.sections.append(current_section)
+                    
+                    # Start new section
+                    section_num = self.extract_number(line)
+                    current_section = Section(
+                        section_number=section_num if section_num else "1",
+                        title=line if len(line) < 100 else "",
+                        content="",
+                        sub_sections=[]
+                    )
+                    content_buffer = []
+                elif current_section:
+                    # Accumulate content for current section
+                    content_buffer.append(line)
+            
+            # Flush remaining structures
+            if current_section and content_buffer:
+                current_section.content = ' '.join(content_buffer)
+                clauses = self.detect_clauses(current_section.content)
+                if clauses:
+                    current_section.clauses = clauses
+                if not current_chapter:
+                    current_chapter = Chapter(
+                        chapter_number="1",
+                        title="सामान्य (General)",
+                        sections=[]
+                    )
+                current_chapter.sections.append(current_section)
+            
+            # Flush chapter into part or act
+            if current_chapter:
+                if current_part:
+                    current_part.chapters.append(current_chapter)
+                else:
+                    # No parts found, add chapter directly to act
+                    act.chapters.append(current_chapter)
+            
+            # Flush part
+            if current_part:
+                act.parts.append(current_part)
+
         return act
 
     def _flush_section(self, section, chapter, content_buffer):
@@ -197,12 +317,40 @@ class NepaliLegalParser:
         return ""
 
     def _find_title(self) -> str:
-        """Extract Act title from first few lines"""
-        if len(self.text_lines) >= 2:
-            # Usually first 2-3 lines contain title
-            return ' '.join(self.text_lines[:2])
-        elif self.text_lines:
-            return self.text_lines[0]
+        """Extract Act title from lines containing 'ऐन'"""
+        # Look for line containing 'ऐन' (Act) keyword - this is the title
+        for i, line in enumerate(self.text_lines[:50]):  # Check first 50 lines
+            if 'ऐन' in line:
+                # Found Act title - may span multiple lines
+                title_parts = [line]
+                
+                # Check if previous line is part of title (no section/chapter markers)
+                if i > 0 and not self.section_pattern.match(self.text_lines[i-1]):
+                    prev_line = self.text_lines[i-1]
+                    # Skip if it looks like header/footer
+                    if not ('www.' in prev_line or 'http' in prev_line or len(prev_line) < 5):
+                        title_parts.insert(0, prev_line)
+                
+                # Check if next line continues the title
+                if i+1 < len(self.text_lines) and not self.section_pattern.match(self.text_lines[i+1]):
+                    next_line = self.text_lines[i+1]
+                    if not ('www.' in next_line or 'http' in next_line) and len(next_line) > 3:
+                        # Only add if it doesn't look like a new section
+                        if not self.chapter_pattern.match(next_line) and not self.part_pattern.match(next_line):
+                            title_parts.append(next_line)
+                
+                return ' '.join(title_parts).strip()
+        
+        # Fallback: look for common patterns
+        for line in self.text_lines[:20]:
+            # Skip obvious headers/footers
+            if 'www.' in line or 'http' in line or len(line) < 5:
+                continue
+            # Skip page numbers
+            if line.isdigit() or (len(line) < 4 and any(c.isdigit() for c in line)):
+                continue
+            return line
+        
         return "Unknown Act"
     
     def _extract_year(self) -> Optional[str]:

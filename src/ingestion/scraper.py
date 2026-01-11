@@ -5,9 +5,9 @@ from playwright.async_api import async_playwright, Page
 
 # Configuration
 BASE_URL = "https://www.lawcommission.gov.np"
-START_URL = "https://www.lawcommission.gov.np/category/1806/" # Existing Laws
+START_URL = "https://www.lawcommission.gov.np/category/1757/"  # Nepal Acts Collection (नेपाल ऐन संग्रह) - 300 Acts
 DOWNLOAD_DIR = r"c:\Users\hp\Desktop\task\vidhi_ai\data\raw"
-MAX_PAGES = 5  # Safety limit for pagination
+MAX_PAGES = 70  # Enough to get all 300+ Acts (approximately 60 pages)
 
 async def download_pdf(page: Page, url: str, title: str):
     """
@@ -83,44 +83,75 @@ async def scrape_catalog():
         context = await browser.new_context()
         page = await context.new_page()
 
-        current_url = START_URL
         pages_scraped = 0
+        current_page_num = 1
+        total_downloaded = 0
 
-        while current_url and pages_scraped < MAX_PAGES:
-            print(f"--- Scraping Catalog Page: {current_url} ---")
-            await page.goto(current_url)
+        while pages_scraped < MAX_PAGES:
+            catalog_url = f"{START_URL}?page={current_page_num}"
+            print(f"\n{'='*70}")
+            print(f"Scraping Catalog Page {current_page_num}: {catalog_url}")
+            print(f"{'='*70}")
+            
+            await page.goto(catalog_url, wait_until='networkidle')
+            await asyncio.sleep(2)  # Wait for page to fully load
             
             # Extract links to the individual Act pages
-            # Based on actual DOM: <div class="category-1-grid"> contains <div class="grid__card">
-            # Each card has <h3 class="card__title"><a href="...">Title</a></h3>
             links = await page.evaluate('''() => {
                 const anchors = Array.from(document.querySelectorAll('.category-1-grid .card__title a'));
                 return anchors.map(a => ({title: a.innerText.trim(), url: a.href}));
             }''')
 
-            print(f"Found {len(links)} acts on this page.")
-
-            # Process each link (Sequential for now to be polite)
-            for link in links:
-                await download_pdf(page, link['url'], link['title'])
-                await asyncio.sleep(1)  # Be respectful - 1 second delay
-            
-            # Pagination: Look for "Next" button
-            # Based on DOM: <a href="?page=2" class="pagination__btn next__pagination">
-            next_url = await page.evaluate('''() => {
-                const nextBtn = document.querySelector('.pagination .next__pagination');
-                return nextBtn ? nextBtn.href : null;
-            }''')
-            
-            current_url = next_url
-            pages_scraped += 1
-            if not next_url:
-                print("No more pages.")
+            if not links:
+                print("No acts found on this page. Ending pagination.")
                 break
 
+            print(f"Found {len(links)} acts on this page.")
+
+            # Process each link
+            for idx, link in enumerate(links, 1):
+                print(f"\n[{idx}/{len(links)}] Processing: {link['title'][:50]}...")
+                
+                # Open Act page in new tab
+                act_page = await context.new_page()
+                try:
+                    await download_pdf(act_page, link['url'], link['title'])
+                    total_downloaded += 1
+                except Exception as e:
+                    print(f"  ✗ Error downloading: {e}")
+                finally:
+                    await act_page.close()
+                    await asyncio.sleep(1)  # Be respectful - 1 second delay
+            
+            # Check if there's a next page
+            next_exists = await page.evaluate('''() => {
+                const nextBtn = document.querySelector('.pagination .next__pagination');
+                return nextBtn !== null;
+            }''')
+            
+            pages_scraped += 1
+            
+            if not next_exists:
+                print(f"\n{'='*70}")
+                print("No more pages found. Scraping complete!")
+                print(f"{'='*70}")
+                break
+            
+            # Move to next page
+            current_page_num += 1
+            print(f"\nMoving to page {current_page_num}...")
+
         await browser.close()
+        
+        print(f"\n{'='*70}")
+        print(f"SCRAPING SUMMARY")
+        print(f"{'='*70}")
+        print(f"Pages scraped: {pages_scraped}")
+        print(f"Total Acts downloaded: {total_downloaded}")
+        print(f"{'='*70}")
 
 if __name__ == "__main__":
     if not os.path.exists(DOWNLOAD_DIR):
         os.makedirs(DOWNLOAD_DIR)
     asyncio.run(scrape_catalog())
+
