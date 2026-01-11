@@ -18,19 +18,24 @@ from src.utils.rate_limiter import get_rate_limiter, with_retry
 from src.utils.lineage import LineageTracker
 from src.utils.metrics import get_metrics, Metrics
 
-SYSTEM_PROMPT = """You are Vidhi-AI, a Nepali Legal Assistant specialized in Nepal's legal framework.
+SYSTEM_PROMPT = """You are Vidhi-AI, an expert Legal Research Assistant for Nepal.
 
-INSTRUCTIONS:
-1. Answer questions based ONLY on the provided legal context.
-2. ALWAYS cite the specific Act, Chapter (परिच्छेद), Section (दफा), and Clause (खण्ड) for every claim.
-3. If the answer is not in the context, state: "I cannot find relevant legal provisions in my indexed documents."
-4. Answer in the language of the user's query (English or Nepali/नेपाली).
-5. Maintain formal legal tone appropriate for legal consultation.
-6. For follow-up questions, use the conversation history to understand context.
+CORE INSTRUCTIONS:
+1. **Analyze Legally:** You will receive legal provisions in Nepali (Devanagari). Analyze them collectively to understand the full legal context.
+2. **Synthesize in English:** Do not just translate. synthesizing the information into a clear, professional, and well-structured English response.
+3. **Be Precise:** When listing requirements (documents, fees, steps), use bullet points for clarity.
+4. **Citation:** Cite your sources at the end of the response using the format: [Act Name, Section X].
+
+RESPONSE GUIDELINES:
+- **Input:** The user asks a question (potentially in Nepali/English).
+- **Context:** You are provided with raw clauses in Nepali.
+- **Output:** You MUST answer in **ENGLISH**.
+  - Start with a direct answer.
+  - Explain the legal provisions clearly.
+  - If multiple clauses relate to the answer, combine them into a cohesive explanation.
 
 CITATION FORMAT:
-- English: [Act Name, Section X, Clause Y]
-- Nepali: [ऐनको नाम, दफा X, खण्ड Y]
+- Reference: [Act Name, Section X, Clause Y]
 """
 
 class LegalChain:
@@ -102,6 +107,18 @@ class LegalChain:
         
         return result
     
+    def _translate_to_nepali(self, query: str) -> str:
+        """Translate query to Nepali for better retrieval"""
+        messages = [
+            {"role": "system", "content": "You are a translator. Translate the following query to Nepali directly. Return ONLY the translated text."},
+            {"role": "user", "content": query}
+        ]
+        try:
+            result = self._call_llm(messages)
+            return result['choices'][0]['message']['content'].strip()
+        except:
+            return query
+
     def answer(self, query: str, session_id: Optional[str] = None) -> Dict:
         """
         Answer a legal question with full tracing
@@ -114,8 +131,16 @@ class LegalChain:
         # Start lineage tracking
         lineage = self.lineage_tracker.start_trace(query)
         
-        # Search for context
-        results = self._search(query)
+        # Optimize Retrieval: Translate to Nepali if query is in English
+        # (Simple heuristic: if mostly ASCII, assume English)
+        search_query = query
+        if len(query) > 0 and all(ord(c) < 128 for c in query.replace(" ", "")):
+            search_query = self._translate_to_nepali(query)
+            if search_query != query:
+                print(f"   (Translated for search: {search_query})")
+        
+        # Search for context using OPTIMIZED (Nepali) query
+        results = self._search(search_query)
         context, sources = self._build_context(results)
         
         # Add sources to lineage
